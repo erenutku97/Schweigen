@@ -607,6 +607,15 @@ SynthDef.new(\rec, {
 }).add; // there's no out since it only records the buffer
 )
 
+(
+~micGrp = Group.new;
+~ptrGrp = Group.after(~micGrp);
+~recGrp = Group.after(~ptrGrp);
+~granGrp = Group.after(~recGrp);
+Synth(\mic, [\in, 0, \out, ~micBus], ~micGrp);
+Synth(\ptr, [\buf, b, \out, ~ptrBus], ~ptrGrp);
+Synth(\rec, [\ptrIn, ~ptrBus, \micIn, ~micBus, \buf, b], ~recGrp);
+)
 
 /// PitchShifter SynthDef
 (
@@ -625,7 +634,6 @@ SynthDef.new(\PitchShift, {
 	Out.ar(\out.kr(0), sig);
 }).add;
 )
-
 // Run Reaper and set ReaRoute as input
 (
 ~pitchShift = [-1.5, 1.2, 1.9, 2.4, 2.8].collect({
@@ -634,6 +642,139 @@ SynthDef.new(\PitchShift, {
 });
 )
 
+// Granulator (as seen on Eli Fieldsteel's tutorial: https://www.youtube.com/watch?v=MnD8stNB5tE )
+(
+SynthDef.new(\gran, {
+	arg amp=0.5, buf=0, out=0,
+	atk = 1, rel=1, gate=1,
+	sync=1, dens=40,
+	baseDur=0.05, durRand=1,
+	rate=1, rateRand=1,
+	pan=0, panRand=0,
+	grainEnv=(-1), ptrBus=0, ptrSampleDelay=20000,
+	ptrRandSamples=5000, minPtrDelay=1000;
+
+	var sig, env, densCtrl, durCtrl, rateCtrl, panCtrl,
+	ptr, ptrRand, totalDelay, maxGrainDur;
+
+	env = EnvGen.kr(Env.adsr(attackTime: atk, releaseTime: rel), gate, doneAction:2);
+	densCtrl = Select.ar(sync, [Dust.ar(dens), Impulse.ar(dens)]);
+	durCtrl = baseDur * LFNoise1.ar(100).exprange(1/durRand, durRand);
+	rateCtrl = rate * LFNoise1.ar(100).exprange(1/rateRand, rateRand);
+	panCtrl = pan + LFNoise1.kr(100).bipolar(panRand);
+
+	ptrRand = LFNoise1.ar(100).bipolar(ptrRandSamples); // random scattering pointer effect
+	totalDelay = max(ptrSampleDelay - ptrRand, minPtrDelay); // we don´t want totalDelay to capture the discontinuity in the buffer, so we should set a limit (if it is too small, it is possible that it will reach the end of the buffer)
+
+	ptr = In.ar(ptrBus, 1);
+	ptr = ptr - totalDelay; // the pointer is delayed so that it comes after the read signal
+	ptr = ptr / BufFrames.kr(buf);
+	// ptr = ptr % 1; // we either .wrap(0,1) to wrap the number between 0 and 1 or get the modulo 1 by %1, since if ptr - ptrSampleDelay is <0, it won´t make sense. GrainBuf does this modulo conversion internally. So this is not really  necessary but it´s there for educational reasons
+
+
+	// if the pointer is 0.5 s after the signal, and we want a grainDur of 0.5 s with a playback rate of 2x, the synth will try to read 1 s of audio and then play it with 2x rate, to output a grainDur of 0.5 s. However, since there´s only 0.5 s of audio ahead, this won´t be possible. Rates less than 1 are not problematic in this case. But for faster rates, this problem should be avoided. This is how:
+	maxGrainDur = (totalDelay / rateCtrl) / SampleRate.ir;
+	durCtrl = min(durCtrl, maxGrainDur);
+
+	sig = GrainBuf.ar(
+		2,
+		densCtrl,
+		durCtrl,
+		buf,
+		rateCtrl,
+		ptr,
+		2,
+		panCtrl,
+		grainEnv,
+	);
+
+	sig = sig * env * amp;
+	Out.ar(out, sig);
+}).add;
+)
+
+MIDIClient.init;
+MIDIIn.connectAll;
+(// When you use Midi input change the Envelope to adsr
+~notes = Array.newClear(128);
+
+MIDIdef.noteOn(\noteOnTest, {
+	arg vel, nn, chan, src;
+	[vel, nn].postln;
+	~notes[nn] = Synth.new(
+	\gran,[
+	\amp, 1,
+	\buf, b,
+	\out, 0,
+	\atk, 0.8,
+	\rel, 0.05,
+	\gate, 1,
+	\sync, 0,
+	\dens, 30,
+	\baseDur, 0.5,
+	\durRand, 0.5,
+	\rate, 1,
+	\rateRand, 0.2.midiratio,
+	\pan, 0,
+	\panRand, 0.8,
+	\grainEnv, -1,
+	\ptrBus, ~ptrBus,
+	\ptrSampleDelay, s.sampleRate / 3, // pointer is delayed 1/3 second
+	\ptrRandSamples, s.sampleRate/3,
+	\minPtrDelay, 1000,
+	], ~granGrp);
+
+	~ptrGrp.set(\rate, 0); // freeze
+});
+MIDIdef.noteOff(\noteOffTest, {
+	arg vel, nn;
+	[vel, nn].postln;
+	~notes[nn].set(\gate, 0);
+	~notes[nn] = nil;
+	~ptrGrp.set(\rate, 1); // unfreeze
+});
+)
+
+// GrainFreeze
+(// When you use Midi input change the Envelope to adsr
+~notes = Array.newClear(128);
+
+MIDIdef.noteOn(\noteOnTest, {
+	arg vel, nn, chan, src;
+	[vel, nn].postln;
+	~notes[nn] = Synth.new(
+	\gran,[
+	\amp, 1,
+	\buf, b,
+	\out, 0,
+	\atk, 0.8,
+	\rel, 0.05,
+	\gate, 1,
+	\sync, 0,
+	\dens, 30,
+	\baseDur, 0.5,
+	\durRand, 0.5,
+	\rate, 1,
+	\rateRand, 0.2.midiratio,
+	\pan, 0,
+	\panRand, 0.8,
+	\grainEnv, -1,
+	\ptrBus, ~ptrBus,
+	\ptrSampleDelay, s.sampleRate / 3, // pointer is delayed 1/3 second
+	\ptrRandSamples, s.sampleRate/3,
+	\minPtrDelay, 1000,
+	], ~granGrp);
+
+	~ptrGrp.set(\rate, 0); // freeze
+});
+MIDIdef.noteOff(\noteOffTest, {
+	arg vel, nn;
+	[vel, nn].postln;
+	~notes[nn].set(\gate, 0);
+	~notes[nn] = nil;
+	~ptrGrp.set(\rate, 1); // unfreeze
+});
+)
 
 ///////////////////// Quantum Bass Wavetable
 (
